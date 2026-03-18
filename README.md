@@ -52,17 +52,17 @@ Layers 1–3 are active by default and handle the vast majority of motion artifa
 
 ## Parts List
 
-Optimised for Pi 4B. Target: **~$30–40 USD** if you already have the Pi.
+Optimised for Pi 4B. Target: **~$30–40 USD** minus the Pi.
 
 | # | Part | Notes | Est. Price |
 |---|---|---|---|
 | 1 | **HLK-LD2450** | Main radar sensor | ~$8–12 |
-| 2 | Raspberry Pi 4B | Already have one | — |
-| 3 | microSD card (16 GB+) | Class 10 / A1 rated | ~$5–8 |
+| 2 | Raspberry Pi 4B | Already have one | $75 |
+| 3 | microSD card (16 GB+) | -- | ~$5–8 |
 | 4 | 5V 3A USB-C power supply | Pi 4B needs 3A; cheap supplies cause instability | ~$8–10 |
 | 5 | Female-to-female jumper wires | GPIO UART wiring | ~$1–2 |
 | *(opt)* | **MPU-6050** IMU breakout | Layer 4 motion compensation; I2C, ~$2 on AliExpress | ~$2–4 |
-| *(opt)* | HDMI display | Fullscreen local kiosk mode | — |
+| *(opt)* | HDMI display | Fullscreen local kiosk mode | -- |
 | *(opt)* | Enclosure / 3D print | Mount sensor + Pi together | ~$3–8 |
 
 ---
@@ -97,7 +97,7 @@ MPU-6050        Pi 4B GPIO
 
 On Pi 4B, `/dev/ttyAMA0` is claimed by Bluetooth by default. Two options:
 
-**Option A — Disable Bluetooth (recommended for this project):**
+**Option A — Disable Bluetooth (What this project does):**
 ```bash
 # Add to /boot/firmware/config.txt (Pi OS Bookworm) or /boot/config.txt (Bullseye):
 dtoverlay=disable-bt
