@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mmWave Radar</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0a0f0a;
+    --surface:   #0f160f;
+    --green:     #00ff41;
+    --green-dim: #00c032;
+    --green-faint: rgba(0,255,65,0.08);
+    --amber:     #ffb300;
+    --text:      #8dbe8d;
+    --text-dim:  #3d5c3d;
+    --ring:      rgba(0,255,65,0.12);
+    --sweep:     rgba(0,255,65,0.55);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Courier New", monospace;
+    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    min-height: 100vh;
+    padding: 20px;
+    gap: 16px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    max-width: 520px;
+  }
+
+  h1 {
+    font-size: 14px;
+    font-weight: normal;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--green);
+  }
+
+  #status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    flex-shrink: 0;
+    transition: background 0.3s;
+  }
+  #status-dot.connected   { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  #status-dot.stabilising { background: var(--amber); }
+  #status-dot.error       { background: #ff3333; }
+
+  #status-label {
+    color: var(--text-dim);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    margin-left: auto;
+  }
+
+  /* ── Radar canvas ── */
+  .radar-wrap {
+    position: relative;
+    width: min(500px, calc(100vw - 40px));
+    aspect-ratio: 1;
+  }
+
+  canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* ── Info bar ── */
+  #info-bar {
+    width: 100%;
+    max-width: 500px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+
+  .info-cell {
+    background: var(--surface);
+    border: 1px solid var(--text-dim);
+    padding: 8px 10px;
+    border-radius: 4px;
+  }
+
+  .info-cell .label {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+
+  .info-cell .value {
+    font-size: 15px;
+    color: var(--green);
+  }
+
+  /* ── Controls ── */
+  #controls {
+    width: 100%;
+    max-width: 500px;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  label { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
+  input[type=range] { accent-color: var(--green); width: 100px; }
+  input[type=range]:focus { outline: none; }
+
+  .val { color: var(--green); min-width: 36px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div id="status-dot"></div>
+  <h1>mmWave Radar</h1>
+  <span id="status-label">DISCONNECTED</span>
+</header>
+
+<div class="radar-wrap">
+  <canvas id="radar"></canvas>
+</div>
+
+<div id="info-bar">
+  <div class="info-cell">
+    <div class="label">Targets</div>
+    <div class="value" id="info-targets">0</div>
+  </div>
+  <div class="info-cell">
+    <div class="label">Max range</div>
+    <div class="value" id="info-range">4000 mm</div>
+  </div>
+  <div class="info-cell">
+    <div class="label">Latency</div>
+    <div class="value" id="info-latency">—</div>
+  </div>
+</div>
+
+<div id="controls">
+  <label>
+    Range
+    <input type="range" id="ctrl-range" min="500" max="6000" step="500" value="4000">
+    <span class="val" id="ctrl-range-val">4000mm</span>
+  </label>
+  <label>
+    Trail
+    <input type="range" id="ctrl-trail" min="0" max="60" step="5" value="30">
+    <span class="val" id="ctrl-trail-val">30</span>
+  </label>
+  <label>
+    Speed
+    <input type="range" id="ctrl-speed" min="0.5" max="4" step="0.5" value="1.5">
+    <span class="val" id="ctrl-speed-val">1.5°</span>
+  </label>
+</div>
+
+<script>
+// ── Config (mirrored from sliders) ──────────────────────────────────────────
+const cfg = {
+  maxRangeMm:  4000,
+  trailFrames: 30,
+  sweepDeg:    1.5,    // degrees advanced per animation frame
+};
+
+// ── WebSocket ────────────────────────────────────────────────────────────────
+const WS_URL = `ws://${location.hostname}:8000/ws`;
+let socket, reconnectTimer;
+
+const dot   = document.getElementById("status-dot");
+const label = document.getElementById("status-label");
+
+function connect() {
+  socket = new WebSocket(WS_URL);
+
+  socket.onopen = () => {
+    dot.className   = "connected";
+    label.textContent = "CONNECTED";
+    clearTimeout(reconnectTimer);
+  };
+
+  socket.onclose = () => {
+    dot.className   = "error";
+    label.textContent = "RECONNECTING";
+    reconnectTimer = setTimeout(connect, 2000);
+  };
+
+  socket.onerror = () => socket.close();
+
+  socket.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    const latency = Date.now() - msg.ts;
+    document.getElementById("info-latency").textContent = latency + " ms";
+    document.getElementById("info-targets").textContent = msg.targets.length;
+
+    if (!msg.stable) {
+      dot.className   = "stabilising";
+      label.textContent = "STABILISING";
+      return;
+    }
+    dot.className   = "connected";
+    label.textContent = "CONNECTED";
+    updateTracks(msg.targets);
+  };
+}
+
+connect();
+
+// ── Track state ──────────────────────────────────────────────────────────────
+// tracks: Map<id, { x, y, history: [{x,y}] }>
+const tracks = new Map();
+const MAX_HISTORY = 60;
+
+function updateTracks(targets) {
+  const seen = new Set();
+  for (const t of targets) {
+    seen.add(t.id);
+    if (!tracks.has(t.id)) {
+      tracks.set(t.id, { x: t.x_mm, y: t.y_mm, history: [] });
+    }
+    const tr = tracks.get(t.id);
+    tr.history.push({ x: tr.x, y: tr.y });
+    if (tr.history.length > MAX_HISTORY) tr.history.shift();
+    tr.x = t.x_mm;
+    tr.y = t.y_mm;
+    tr.speed = t.speed_cms;
+  }
+  // Remove stale tracks
+  for (const id of tracks.keys()) {
+    if (!seen.has(id)) {
+      const tr = tracks.get(id);
+      tr.history.push({ x: tr.x, y: tr.y });
+      if (tr.history.length > MAX_HISTORY) tr.history.shift();
+      if (tr.history.length === 0) tracks.delete(id);
+      else tr.x = null; // mark as lost — still draw trail
+    }
+  }
+}
+
+// ── Canvas renderer ───────────────────────────────────────────────────────────
+const canvas = document.getElementById("radar");
+const ctx    = canvas.getContext("2d");
+
+let sweepAngle = -Math.PI / 2; // start pointing up (sensor forward = top)
+let DPR = 1, SIZE, CX, CY, R;
+
+function resize() {
+  DPR  = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  SIZE = rect.width;
+  canvas.width  = SIZE * DPR;
+  canvas.height = SIZE * DPR;
+  ctx.scale(DPR, DPR);
+  CX = SIZE / 2;
+  CY = SIZE / 2;
+  R  = SIZE / 2 - 4;
+}
+
+window.addEventListener("resize", resize);
+resize();
+
+function mmToCanvas(x_mm, y_mm) {
+  // Sensor: X = lateral (±), Y = forward (positive)
+  // Canvas: origin = center, Y increases downward
+  // We map forward (sensor Y) to UP on screen (canvas -Y)
+  const scale = R / cfg.maxRangeMm;
+  return {
+    cx: CX + x_mm * scale,
+    cy: CY - y_mm * scale,
+  };
+}
+
+function drawRings() {
+  const rings = 4;
+  ctx.strokeStyle = "rgba(0,255,65,0.12)";
+  ctx.lineWidth   = 0.5;
+  for (let i = 1; i <= rings; i++) {
+    const r = (R / rings) * i;
+    ctx.beginPath();
+    ctx.arc(CX, CY, r, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Range label
+    const rangeMm = Math.round((cfg.maxRangeMm / rings) * i);
+    ctx.fillStyle = "rgba(0,255,65,0.3)";
+    ctx.font      = `${Math.max(9, SIZE * 0.022)}px "Courier New"`;
+    ctx.textAlign = "left";
+    ctx.fillText(rangeMm + "mm", CX + 4, CY - r + 12);
+  }
+
+  // Cross hairs
+  ctx.strokeStyle = "rgba(0,255,65,0.07)";
+  ctx.beginPath(); ctx.moveTo(CX, CY - R); ctx.lineTo(CX, CY + R); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX - R, CY); ctx.lineTo(CX + R, CY); ctx.stroke();
+}
+
+function drawSweep() {
+  // Sweep cone — fan 90° behind current angle
+  const coneAngle = Math.PI / 2;
+  const grad = ctx.createConicalGradient
+    ? null  // not widely supported; use manual arc fill
+    : null;
+
+  // Draw sweep as a series of thin arc slices fading out
+  const steps = 24;
+  for (let i = 0; i < steps; i++) {
+    const frac  = i / steps;
+    const start = sweepAngle - coneAngle * (1 - frac);
+    const end   = sweepAngle - coneAngle * (1 - frac - 1 / steps);
+    const alpha = Math.pow(frac, 1.5) * 0.45;
+    ctx.beginPath();
+    ctx.moveTo(CX, CY);
+    ctx.arc(CX, CY, R, start, end);
+    ctx.closePath();
+    ctx.fillStyle = `rgba(0,255,65,${alpha})`;
+    ctx.fill();
+  }
+
+  // Leading edge line
+  ctx.beginPath();
+  ctx.moveTo(CX, CY);
+  ctx.lineTo(
+    CX + Math.cos(sweepAngle) * R,
+    CY + Math.sin(sweepAngle) * R,
+  );
+  ctx.strokeStyle = "rgba(0,255,65,0.9)";
+  ctx.lineWidth   = 1.5;
+  ctx.stroke();
+}
+
+function isInSweepCone(cx, cy) {
+  // Is a canvas point currently being illuminated by the sweep?
+  const dx    = cx - CX;
+  const dy    = cy - CY;
+  const angle = Math.atan2(dy, dx);
+  let diff    = sweepAngle - angle;
+  // Normalise to [-π, π]
+  while (diff >  Math.PI) diff -= 2 * Math.PI;
+  while (diff < -Math.PI) diff += 2 * Math.PI;
+  return diff >= 0 && diff < Math.PI / 2;
+}
+
+function drawTracks() {
+  const trailLen = cfg.trailFrames;
+
+  for (const [id, tr] of tracks) {
+    const histLen = tr.history.length;
+    if (histLen === 0 && tr.x === null) {
+      tracks.delete(id);
+      continue;
+    }
+
+    // Draw trail
+    for (let i = Math.max(0, histLen - trailLen); i < histLen; i++) {
+      const h = tr.history[i];
+      const { cx, cy } = mmToCanvas(h.x, h.y);
+      const age   = histLen - i;
+      const alpha = Math.max(0, 1 - age / trailLen) * 0.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(0,255,65,${alpha})`;
+      ctx.fill();
+    }
+
+    // Draw active blip
+    if (tr.x !== null) {
+      const { cx, cy } = mmToCanvas(tr.x, tr.y);
+      const inCone = isInSweepCone(cx, cy);
+
+      // Outer glow ring
+      ctx.beginPath();
+      ctx.arc(cx, cy, inCone ? 9 : 6, 0, Math.PI * 2);
+      ctx.strokeStyle = inCone
+        ? "rgba(0,255,65,0.5)"
+        : "rgba(0,192,50,0.25)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Core dot
+      ctx.beginPath();
+      ctx.arc(cx, cy, 3, 0, Math.PI * 2);
+      ctx.fillStyle = inCone ? "#00ff41" : "#00c032";
+      ctx.fill();
+    }
+  }
+}
+
+function drawCenter() {
+  ctx.beginPath();
+  ctx.arc(CX, CY, 3, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(0,255,65,0.6)";
+  ctx.fill();
+
+  // "NORTH" tick (sensor forward direction)
+  ctx.beginPath();
+  ctx.moveTo(CX, CY - R - 2);
+  ctx.lineTo(CX, CY - R + 6);
+  ctx.strokeStyle = "rgba(0,255,65,0.5)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+function frame() {
+  ctx.clearRect(0, 0, SIZE * DPR, SIZE * DPR);
+
+  // Clip to circle
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(CX, CY, R, 0, Math.PI * 2);
+  ctx.clip();
+
+  drawRings();
+  drawSweep();
+  drawTracks();
+  drawCenter();
+
+  ctx.restore();
+
+  // Border ring
+  ctx.beginPath();
+  ctx.arc(CX, CY, R, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(0,255,65,0.35)";
+  ctx.lineWidth   = 1;
+  ctx.stroke();
+
+  // Advance sweep
+  sweepAngle += (cfg.sweepDeg * Math.PI) / 180;
+  if (sweepAngle > Math.PI) sweepAngle -= 2 * Math.PI;
+
+  requestAnimationFrame(frame);
+}
+
+requestAnimationFrame(frame);
+
+// ── Slider controls ───────────────────────────────────────────────────────────
+function bindSlider(id, valId, cfgKey, fmt) {
+  const slider = document.getElementById(id);
+  const valEl  = document.getElementById(valId);
+  slider.addEventListener("input", () => {
+    cfg[cfgKey] = parseFloat(slider.value);
+    valEl.textContent = fmt(slider.value);
+    if (cfgKey === "maxRangeMm") {
+      document.getElementById("info-range").textContent = slider.value + " mm";
+    }
+  });
+}
+
+bindSlider("ctrl-range", "ctrl-range-val", "maxRangeMm", v => v + "mm");
+bindSlider("ctrl-trail", "ctrl-trail-val", "trailFrames", v => v);
+bindSlider("ctrl-speed", "ctrl-speed-val", "sweepDeg",   v => v + "°");
+</script>
+</body>
+</html>
